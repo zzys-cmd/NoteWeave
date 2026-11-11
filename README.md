@@ -208,7 +208,7 @@ npm run dev                               # http://localhost:3000，已配好到
 │       ├── i18n/                 # zh-CN / en-US
 │       ├── pages/                # 12 个页面
 │       └── stores/               # Zustand
-├── docs/                         # 设计演进、故障排除、复习资料
+├── docs/                         # 设计演进、故障排除
 ├── images/                       # 截图
 ├── plan/                         # 设计文档归档
 ├── docker-compose.yml            # 5 个服务：frontend / backend / mysql / redis / neo4j

@@ -268,7 +268,7 @@ OPENAI_MODEL_NAME=qwen3-max
 
 ```bash
 cd backend
-uv run --no-sync pytest -q          # 552 个测试函数，用 fake 模型与 aiosqlite，不依赖外部服务
+uv run --no-sync pytest -q          # 857 个用例（827 passed / 30 skipped），用 fake 模型与 aiosqlite，不依赖外部服务
 uv run --no-sync ruff check .       # 代码检查
 
 cd front

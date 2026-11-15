@@ -106,6 +106,8 @@ async def main() -> None:
     ap.add_argument("--clean", action="store_true", help="先 clear_all_docs 清空 eval 用户")
     ap.add_argument("--chunk-size", type=int, default=None, help="覆盖 document.yaml 的 chunk_size")
     ap.add_argument("--chunk-overlap", type=int, default=None)
+    ap.add_argument("--concurrency", type=int, default=1,
+                    help="并发处理的文档数（embedding 与写入并行；1 = 串行，行为与旧版一致）")
     args = ap.parse_args()
 
     queries, corpus, qrels = load_data(args.dataset_dir)
@@ -131,28 +133,106 @@ async def main() -> None:
     chunk_total = 0
     skip_empty = 0
     started = time.time()
-    # 每 doc 一批切分+嵌入+写入，便于进度展示
-    for i, did in enumerate(doc_ids, 1):
+    sem = asyncio.Semaphore(max(1, args.concurrency))
+    progress_lock = asyncio.Lock()
+
+    async def _embed_with_retry(pieces: list[str], retries: int = 3) -> list[list[float]]:
+        """限流/网络抖动时退避重试；--concurrency>1 时靠 semaphore 控并发。"""
+        last_exc: Exception | None = None
+        for attempt in range(retries):
+            try:
+                async with sem:
+                    return await asyncio.to_thread(model.embed_documents, pieces)
+            except Exception as e:  # noqa: BLE001 - 供应商限流形态各异
+                last_exc = e
+                await asyncio.sleep(1.5 * (attempt + 1))
+        assert last_exc is not None
+        raise last_exc
+
+    async def _prepare_one(did: str) -> tuple[str, str, list[dict]] | None:
+        """切分 + 嵌入，返回待写入的 (doc_id, title, chunks)；空文档返回 None。
+
+        只做 CPU/网络部分，不碰 Neo4j —— 写入由 _flush 批量完成。
+        """
+        nonlocal skip_empty
         text = ctext.get(did, "")
         if not text or not text.strip():
-            skip_empty += 1
-            continue
+            async with progress_lock:
+                skip_empty += 1
+            return None
         pieces = await splitter.split_text(text)
         if not pieces:
-            skip_empty += 1
-            continue
-        vectors = await asyncio.to_thread(model.embed_documents, pieces)
+            async with progress_lock:
+                skip_empty += 1
+            return None
+        vectors = await _embed_with_retry(pieces)
         chunks = [
             {"chunk_index": idx, "text": piece, "embedding": vectors[idx]}
             for idx, piece in enumerate(pieces)
         ]
         title = ctitle.get(did) or f"doc-{did}"
-        await store.ensure_source_node(args.user_id, "doc", did, title)
-        await store.upsert_chunks(args.user_id, "doc", did, title, chunks)
-        ingest_total += 1
-        chunk_total += len(chunks)
-        if i % 25 == 0 or i == len(doc_ids):
-            print(f"[ingest] {i}/{len(doc_ids)} docs ({time.time()-started:.0f}s) chunks={chunk_total}")
+        return did, title, chunks
+
+    async def _flush(batch: list[tuple[str, str, list[dict]]], done_after: int) -> None:
+        """一批文档一次事务写入 Doc 节点 + Chunk 节点。
+
+        逐 doc 调用 upsert_chunks 会产生 2×N 次事务，写 2 万文档时事务提交成为瓶颈
+        （实测 ~0.9s/doc）；合并成一次 UNWIND 后降到几十毫秒一批。
+        写入语义与 upsert_chunks 一致：复合键 (id, user_id) MERGE，可重复覆盖。
+        """
+        nonlocal ingest_total, chunk_total
+        doc_rows = [
+            {"sid": did, "uid": args.user_id, "title": title}
+            for did, title, _ in batch
+        ]
+        chunk_rows: list[dict] = []
+        for did, title, chunks in batch:
+            for chunk in chunks:
+                chunk_rows.append({
+                    "id": f"doc:{did}:{chunk['chunk_index']}",
+                    "user_id": args.user_id,
+                    "kind": "doc",
+                    "source_id": did,
+                    "source_name": title,
+                    "chunk_index": chunk["chunk_index"],
+                    "text": chunk["text"],
+                    "embedding": chunk["embedding"],
+                    "page": None,
+                    "image_paths": None,
+                })
+        await store._run(
+            "UNWIND $rows AS row "
+            "MERGE (d:Doc {id: row.sid, user_id: row.uid}) "
+            "ON CREATE SET d.created_at = timestamp() "
+            "SET d.filename = row.title",
+            {"rows": doc_rows},
+        )
+        if chunk_rows:
+            await store._run(
+                "UNWIND $rows AS row "
+                "MERGE (c:Chunk {id: row.id, user_id: row.user_id}) "
+                "SET c.kind = row.kind, c.source_id = row.source_id, "
+                "c.source_name = row.source_name, c.chunk_index = row.chunk_index, "
+                "c.text = row.text, c.embedding = row.embedding, "
+                "c.page = row.page, c.image_paths = row.image_paths",
+                {"rows": chunk_rows},
+            )
+        ingest_total += len(batch)
+        chunk_total += len(chunk_rows)
+        print(
+            f"[ingest] {done_after}/{len(doc_ids)} docs ({time.time() - started:.0f}s) "
+            f"chunks={chunk_total}",
+            flush=True,
+        )
+
+    # 分批：每批先并发切分+嵌入，再一次性写库（写入批大小 = concurrency*8）
+    batch_size = max(1, args.concurrency * 8)
+    for start in range(0, len(doc_ids), batch_size):
+        part = doc_ids[start:start + batch_size]
+        prepared = await asyncio.gather(*(_prepare_one(d) for d in part))
+        batch = [item for item in prepared if item is not None]
+        if batch:
+            await _flush(batch, start + len(part))
 
     manifest = {
         "source_dataset": DATASET_REPO,

@@ -2,6 +2,8 @@
 
 <div align="center">
 
+[![CI](https://github.com/zzys-cmd/NoteWeave/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/zzys-cmd/NoteWeave/actions/workflows/ci.yml)
+![Tests](https://img.shields.io/badge/tests-857%20passed-brightgreen?style=flat-square&logo=pytest&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.123-009688?style=flat-square&logo=fastapi&logoColor=white)
 ![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black)

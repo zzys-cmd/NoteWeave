@@ -1,0 +1,49 @@
+name: Integration
+
+# 只在网页上手动触发，不随 push 运行：真实调用外部服务（rerank API），会消耗额度
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "要跑的集成测试路径"
+        required: false
+        default: "tests/integration"
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "0.12.14"
+          python-version: "3.12"
+          enable-cache: true
+          working-directory: backend
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev --no-group parsers
+
+      # 没有 secret 时测试会自动 skip，会让人误以为通过，这里先硬性拦下
+      - name: Require RERANKER_API_KEY
+        run: |
+          if [ -z "${{ secrets.RERANKER_API_KEY }}" ]; then
+            echo "::error::未配置 secret RERANKER_API_KEY，请到 Settings → Secrets and variables → Actions 添加后再运行"
+            exit 1
+          fi
+
+      - name: Run integration tests
+        env:
+          RERANKER_API_BASE_URL: https://api.siliconflow.cn/v1
+          RERANKER_API_KEY: ${{ secrets.RERANKER_API_KEY }}
+          RERANKER_MODEL: BAAI/bge-reranker-v2-m3
+        run: uv run --no-sync pytest "${{ inputs.suite }}" -m integration -v

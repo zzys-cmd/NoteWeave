@@ -68,6 +68,9 @@ parsers = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "integration: 需要真实外部服务（API Key / Neo4j）的测试，未配置时自动跳过",
+]
 filterwarnings = [
     "ignore::DeprecationWarning:fastapi.*",
     "ignore::DeprecationWarning:pydantic.*",

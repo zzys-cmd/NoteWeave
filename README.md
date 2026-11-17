@@ -198,7 +198,10 @@ npm run dev                               # http://localhost:3000，已配好到
 │   │   │   └── vector_store.py
 │   │   ├── router/               # 聊天、笔记、模板、回顾、知识库、用户、健康检查
 │   │   ├── schemas/              # Pydantic 模型
-│   │   └── services/             # 笔记、回顾、模板、会话管理
+│   │   ├── services/             # 笔记、回顾、模板、会话管理
+│   │   └── utils/                # 模型工厂、文件与图片处理、鉴权、prompt 加载
+│   ├── scripts/                  # 数据入库、四套评测脚本、图谱回填与检查
+│   ├── results/                  # 评测报告（retrieval / end2end / graph / rerank）
 │   ├── tests/                    # pytest（含 fake 模型与 fake 存储）
 │   ├── main.py
 │   └── pyproject.toml
@@ -208,9 +211,13 @@ npm run dev                               # http://localhost:3000，已配好到
 │       ├── components/           # 编辑器、图谱画布、知识库抽屉、笔记侧栏
 │       ├── hooks/                # useSSE、useGraphEvents、useDebounce
 │       ├── i18n/                 # zh-CN / en-US
+│       ├── layouts/              # 主界面 / 登录页两套框架
 │       ├── pages/                # 12 个页面
-│       └── stores/               # Zustand
-├── docs/                         # 设计演进、故障排除
+│       ├── router/               # 路由表
+│       ├── stores/               # Zustand
+│       ├── types/                # api / graph 类型定义
+│       └── utils/                # 思考轨迹、wiki 导航等
+├── docs/                         # 设计演进、故障排除、评测复现
 ├── images/                       # 截图
 ├── plan/                         # 设计文档归档
 ├── docker-compose.yml            # 5 个服务：frontend / backend / mysql / redis / neo4j

@@ -240,8 +240,8 @@ npm run dev                               # http://localhost:3000，已配好到
 **2. 图谱构建走异步任务表，不走同步等待**
 写笔记或上传文档时只往 `graph_build_tasks` 写一行 `pending`，接口立刻返回。后台 worker 每 2 秒轮询，用一条 `UPDATE ... WHERE status='pending'` 原子认领并写入 `run_token`，之后每个阶段都校验令牌——这样即使一次抽取超时、任务被重投给另一个 worker，旧的那次也写不进结果。进程重启时会把遗留的 `running` 任务捡回来重跑。
 
-**3. 混合检索用 RRF 融合**
-向量索引和全文索引各取 2×limit 候选，按 `1/(60 + rank)` 累加分值后排序。查询向量化失败时自动退化为纯全文检索，不会整条链路报错。
+**3. 混合检索用 RRF 融合，再精排一次**
+向量索引和全文索引各取 2×limit 候选，按 `1/(60 + rank)` 累加分值后排序。融合结果默认直接返回；打开 `RERANK_ENABLED` 后会对前 20 条正文证据再调一次 rerank 接口精排——图实体证据不参与，它的内容是实体描述，打分没有意义。重排按原槽位回填，图证据在列表里的位置不变；超时 3 秒或接口失败直接退回原顺序，不影响回答。
 
 **4. 会写数据的工具要人点确认**
 Agent 里的 `create_note_tool` 挂了 `HumanInTheLoopMiddleware`：模型想建笔记时先中断，把待执行的参数推给前端，用户点同意才继续。中断状态存在 MySQL checkpoint 里，刷新页面能从 `/chat/session/{id}/pending` 取回来接着走。
@@ -251,6 +251,26 @@ Agent 里的 `create_note_tool` 挂了 `HumanInTheLoopMiddleware`：模型想建
 
 **6. 数据隔离在 SQL 和 Cypher 里都做**
 `user_id` 从 JWT 解出来注入依赖，MySQL 的 `WHERE` 和 Neo4j 的 `MATCH` 都带这个条件——图数据库里的实体按 `(id, user_id)` 复合键写入，不存在跨用户串数据。
+
+## 评测
+
+检索质量用公开中文数据集 **DuRetrieval**（500 query / 20,000 文档 / 9,839 条人工相关性标注）测，脚本 `backend/scripts/eval_recall.py`，复现步骤见 [docs/评测复现.md](docs/评测复现.md)。
+
+| 指标 | 向量 + 全文 RRF | 再加 rerank | 变化 |
+|---|---|---|---|
+| recall@1 | 0.266 | 0.294 | +2.8 |
+| recall@5 | 0.728 | **0.817** | +8.9 |
+| recall@10 | 0.868 | 0.908 | +4.0 |
+| MRR | 0.938 | **0.972** | +3.3 |
+| nDCG@10 | 0.865 | 0.931 | +6.6 |
+| MAP | 0.820 | 0.908 | +8.8 |
+| 检索延迟 p50 | 231ms | 676ms | +445ms |
+
+rerank 用 `BAAI/bge-reranker-v2-m3` 对融合后的前 20 条重排，单次调用 p50 441ms。逐条看，500 个 query 里 149 条提升、13 条下降、338 条不变。
+
+端到端（20 条自动合成问答 + LLM 裁判）：忠实度 4.75/5、正确性 4.50/5，管线 4.9s。
+
+完整报告在 [`backend/results/`](backend/results/)。
 
 ## 配置说明
 

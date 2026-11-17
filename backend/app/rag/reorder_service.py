@@ -22,9 +22,9 @@ class ReorderService:
         self.model = settings.RERANKER_MODEL
         self.http_client_factory = http_client_factory or httpx.AsyncClient
 
-    async def _rerank(self, query: str, documents: list[str]) -> list[float]:
+    async def _rerank(self, query: str, documents: list[str], timeout: float = 10.0) -> list[float]:
         """调用 rerank API，按文档原顺序返回相关性分数。"""
-        async with self.http_client_factory(timeout=10.0) as client:
+        async with self.http_client_factory(timeout=timeout) as client:
             resp = await client.post(
                 f"{self.api_base_url}/rerank",
                 headers={"Authorization": f"Bearer {self.api_key}"},
@@ -34,6 +34,15 @@ class ReorderService:
             data = resp.json()
         results = sorted(data.get("results", []), key=lambda r: r.get("index", 0))
         return [float(r.get("relevance_score", 0.0)) for r in results]
+
+    async def score(self, query: str, documents: list[str], timeout: float = 10.0) -> list[float]:
+        """返回与 documents 等长的相关性分数，顺序与输入一致（不排序）。
+
+        评测脚本做重排前后对比、主链路做证据重排时只需分数，排序由调用方决定。
+        """
+        if not documents:
+            return []
+        return await self._rerank(query, documents, timeout=timeout)
 
     async def reorder_documents(self, query: str, documents: list[str], thinking_callback=None) -> dict[str, Any]:
         """

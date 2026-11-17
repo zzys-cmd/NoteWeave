@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     RERANKER_API_KEY: str = ""
     RERANKER_MODEL: str = ""
 
+    # 检索后重排：只对正文类证据（非图实体）重排前 N 条，失败或超时保持原顺序
+    RERANK_ENABLED: bool = False
+    RERANK_TOP_N: int = 20
+    RERANK_TIMEOUT_S: float = 3.0
+
     # 限流全局开关
     RATE_LIMIT_ENABLED: bool = True
 

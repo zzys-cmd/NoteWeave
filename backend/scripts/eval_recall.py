@@ -28,6 +28,7 @@ BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND))
 
 from app.graph.storage.neo4j_graph_store import Neo4jGraphStore  # noqa: E402
+from app.rag.reorder_service import ReorderService  # noqa: E402
 from app.utils.factory import EmbedModelFactory  # noqa: E402
 
 TOP_Ks = [1, 3, 5, 10]
@@ -90,7 +91,16 @@ async def main() -> None:
     ap.add_argument("--results-dir", type=Path, default=BACKEND / "results" / "eval_retrieval")
     ap.add_argument("--limit", type=int, default=100, help="检索池/文档级截断；MAP 以该值为上限")
     ap.add_argument("--warmup", type=int, default=1, help="跑 N 条占位 query 预热索引后再计时")
+    ap.add_argument("--rerank", action="store_true", help="开启云端 rerank 重排（需配置 RERANKER_*）")
+    ap.add_argument("--rerank-top-n", type=int, default=20, help="只重排前 N 条，其余保持原顺序")
     args = ap.parse_args()
+
+    reranker: ReorderService | None = None
+    if args.rerank:
+        reranker = ReorderService()
+        if not reranker.api_base_url or not reranker.api_key:
+            raise SystemExit("--rerank 需要配置 RERANKER_API_BASE_URL / RERANKER_API_KEY / RERANKER_MODEL")
+        print(f"[rerank] model={reranker.model} base={reranker.api_base_url} top_n={args.rerank_top_n}")
 
     m = json.loads(args.manifest.read_text(encoding="utf-8"))
     user_id = m["user_id"]
@@ -101,9 +111,20 @@ async def main() -> None:
     store = Neo4jGraphStore()
     model = EmbedModelFactory().generator()
 
+    rerank_latencies: list[float] = []
+
     async def search(q: str):
         emb = await asyncio.to_thread(model.embed_query, q)
         hits = await store.search_chunks(user_id, emb, q, ["doc"], args.limit)
+        if reranker is not None and hits:
+            # 只重排前 top_n 条，其余保持原顺序接在后面（线上也只重排候选头部）
+            top_n = min(args.rerank_top_n, len(hits))
+            head, tail = hits[:top_n], hits[top_n:]
+            t_rr = time.time()
+            scores = await reranker.score(q, [h.text or "" for h in head])
+            rerank_latencies.append((time.time() - t_rr) * 1000.0)
+            order = sorted(range(len(head)), key=lambda i: scores[i], reverse=True)
+            hits = [head[i] for i in order] + tail
         return _ranked_doc_ids(hits)
 
     # 预热
@@ -151,6 +172,14 @@ async def main() -> None:
     md = ["# 检索信息量评测报告", ""]
     md.append(f"- 数据集：{m.get('source_dataset')}  (queries={len(qids)}, docs={len(m['doc_ids'])}, chunks={m.get('total_chunks')})")
     md.append(f"- 评测用户：`{user_id}`")
+    if reranker is not None:
+        rr = sorted(rerank_latencies) or [0.0]
+        md.append(
+            f"- 重排：云端 rerank（`{reranker.model}`），只重排前 {args.rerank_top_n} 条，"
+            f"单次 p50 {statistics.median(rr):.0f}ms"
+        )
+    else:
+        md.append("- 重排：未启用（RRF 融合后直接取 top-k）")
     md.append("- 指标：recall@k（相关文档被召回占比）、hit@k（至少召回一条相关文档）、MRR（首个相关文档的倒数排名）、nDCG@10（排序质量）、MAP（平均精度）")
     md.append("")
     md.append("| 指标 | 值 |")

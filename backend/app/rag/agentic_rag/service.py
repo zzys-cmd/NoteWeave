@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 from app.core.logger_handler import logger
+from app.core.settings import settings
 from app.rag.agentic_rag.evaluator import AnswerabilityEvaluator
 from app.rag.agentic_rag.evidence import format_evidence_context, merge_evidence
 from app.rag.agentic_rag.local_retriever import LocalRetriever
@@ -86,6 +87,16 @@ class AgenticRagService:
         retrieval_ms = (time.perf_counter() - t_retrieval) * 1000
         logger.info(f"【RAG耗时】local_retrieval={retrieval_ms:.0f}ms graph_steps={len(graph_steps)} text_steps={len(text_steps)} evidence={len(local_evidences)}")
         local_evidences = [*local_evidences, *graph_evidences]
+
+        if settings.RERANK_ENABLED and local_evidences:
+            t_rr = time.perf_counter()
+            reranked = await self._rerank_evidences(query, local_evidences)
+            changed = [ev.id for ev in reranked] != [ev.id for ev in local_evidences]
+            logger.info(
+                f"【RAG耗时】rerank={(time.perf_counter() - t_rr) * 1000:.0f}ms "
+                f"evidence={len(reranked)} top_changed={changed}"
+            )
+            local_evidences = reranked
 
         await self._emit(
             thinking_callback,
@@ -199,6 +210,39 @@ class AgenticRagService:
         if not steps:
             return []
         return await self.local_retriever.search(user_id, steps)
+
+    async def _rerank_evidences(self, query: str, evidences: list[Evidence]) -> list[Evidence]:
+        """对正文类证据做一次重排；图实体证据不参与（其 content 是实体描述，打分无意义）。
+
+        只重排前 RERANK_TOP_N 条非图证据，重排结果按原槽位回填，图证据位置不变。
+        调用失败、超时、返回分数条数不符时原样返回，保证重排不阻塞回答。
+        """
+        from app.core.background_init import init_manager
+        from app.rag.reorder_service import ReorderService
+
+        slots = [i for i, ev in enumerate(evidences) if ev.source != "graph"]
+        if len(slots) < 2:
+            return evidences
+        head_slots = slots[: settings.RERANK_TOP_N]
+        head = [evidences[i] for i in head_slots]
+        service = getattr(init_manager, "reorder_service", None) or ReorderService()
+        try:
+            scores = await service.score(
+                query,
+                [ev.content or "" for ev in head],
+                timeout=settings.RERANK_TIMEOUT_S,
+            )
+        except Exception as exc:  # 重排是增强项，任何异常都退回原顺序
+            logger.warning(f"rerank 失败，保持原顺序: {exc}")
+            return evidences
+        if len(scores) != len(head):
+            logger.warning(f"rerank 返回分数数不一致（{len(scores)} != {len(head)}），保持原顺序")
+            return evidences
+        order = sorted(range(len(head)), key=lambda i: scores[i], reverse=True)
+        merged = list(evidences)
+        for slot, idx in zip(head_slots, order):
+            merged[slot] = head[idx]
+        return merged
 
     async def _emit(
         self,
